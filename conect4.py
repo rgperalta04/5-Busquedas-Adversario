@@ -26,6 +26,7 @@ empate.
 
 """
 
+import math
 import juegos_simplificado as js
 import minimax
 
@@ -150,15 +151,93 @@ def evalua_3con(s):
         raise ValueError("Evaluación fuera de rango --> ", promedio)
     return promedio
 
+# ---------------------------------------------------------------------------
+# Funciones mejoradas de ordenamiento y evaluación
+# ---------------------------------------------------------------------------
+
+# Tabla de pesos posicionales: cada celda indica cuántas líneas ganadoras
+# posibles la atraviesan. Las celdas centrales participan en más líneas,
+# por lo que tienen mayor valor estratégico.
+_TABLA_POSICION = [
+    3, 4, 5, 7, 5, 4, 3,
+    4, 6, 8,10, 8, 6, 4,
+    5, 8,11,13,11, 8, 5,
+    5, 8,11,13,11, 8, 5,
+    4, 6, 8,10, 8, 6, 4,
+    3, 4, 5, 7, 5, 4, 3,
+]
+
+# Pre-generación de todas las ventanas de 4 celdas (horizontal, vertical,
+# diagonal \ y diagonal /). Se hace una sola vez al cargar el módulo para
+# no repetir el cálculo en cada llamada a evalua_mejorada.
+_VENTANAS_4 = (
+    [[f*7+c+k for k in range(4)] for f in range(6) for c in range(4)] +
+    [[(f+k)*7+c for k in range(4)] for c in range(7) for f in range(3)] +
+    [[(f+k)*7+c+k for k in range(4)] for f in range(3) for c in range(4)] +
+    [[(f+k)*7+c-k for k in range(4)] for f in range(3) for c in range(3,7)]
+)
+
+def ordena_mejor(jugadas, jugador):
+    """
+    Ordena las jugadas por cercanía al centro real del tablero (columna 3).
+
+    La versión original usaba abs(x-4), lo que priorizaba la columna 4 en
+    lugar del centro real. En un tablero de 7 columnas (0-6) el centro es
+    la columna 3.
+
+    Al explorar primero las columnas más prometedoras, alfa-beta encuentra
+    cotas más ajustadas y poda más ramas, permitiendo llegar a mayor
+    profundidad en el mismo tiempo.
+    """
+    ORDEN = {3: 0, 4: 1, 2: 2, 5: 3, 1: 4, 6: 5, 0: 6}
+    return sorted(jugadas, key=lambda c: ORDEN.get(c, 6))
+
+def evalua_mejorada(s):
+    """
+    Evalúa el estado s para el jugador 1. Devuelve un valor en (-1, 1).
+
+    Combina dos criterios:
+    - Ventanas de 4 celdas: puntúa cada ventana según su contenido.
+        3 propias + 1 vacía  → +50  (amenaza inmediata de ganar)
+        2 propias + 2 vacías → +10  (control de espacio)
+        1 propia  + 3 vacías →  +2  (presencia mínima)
+      Lo mismo en negativo para el rival.
+    - Control posicional: suma los pesos de _TABLA_POSICION para las
+      fichas propias y resta los del rival. Las celdas centrales valen
+      más porque participan en más líneas ganadoras posibles.
+
+    La combinación se normaliza con tanh para garantizar el rango (-1, 1)
+    sin confundirse con los valores terminales exactos ±1.
+    """
+    puntaje_ventanas = 0
+    for ventana in _VENTANAS_4:
+        propias = sum(1 for i in ventana if s[i] ==  1)
+        rival   = sum(1 for i in ventana if s[i] == -1)
+        vacias  = 4 - propias - rival
+        if propias > 0 and rival == 0:
+            if   propias == 3 and vacias == 1: puntaje_ventanas += 50
+            elif propias == 2 and vacias == 2: puntaje_ventanas += 10
+            elif propias == 1 and vacias == 3: puntaje_ventanas +=  2
+        elif rival > 0 and propias == 0:
+            if   rival == 3 and vacias == 1: puntaje_ventanas -= 50
+            elif rival == 2 and vacias == 2: puntaje_ventanas -= 10
+            elif rival == 1 and vacias == 3: puntaje_ventanas -=  2
+
+    puntaje_pos = sum(_TABLA_POSICION[i] * s[i] for i in range(42))
+
+    score = (0.70 * puntaje_ventanas / 3450.0
+           + 0.30 * puntaje_pos / 378.0)
+
+    return max(-0.9999, min(0.9999, math.tanh(score * 3)))
+
+
 if __name__ == '__main__':
 
     cfg = {
-        "Jugador 1": "Humano",      #Puede ser "Humano", "Aleatorio", "Negamax", "Tiempo"
-        "Jugador 2": "Aleatorio",   #Puede ser "Humano", "Aleatorio", "Negamax", "Tiempo"
+        "Jugador 1": "Humano",          #Puede ser "Humano", "Aleatorio", "Negamax", "Tiempo", "NegamaxMejorado", "TiempoMejorado"
+        "Jugador 2": "NegamaxMejorado", #Puede ser "Humano", "Aleatorio", "Negamax", "Tiempo", "NegamaxMejorado", "TiempoMejorado"
         "profundidad máxima": 5,
         "tiempo": 10,
-        "ordena": ordena_centro,    #Puede ser None o una función f(jugadas, j) -> lista de jugadas ordenada
-        "evalua": evalua_3con       #Puede ser None o una función f(estado) -> número entre -1 y 1
     }
 
     def jugador_cfg(cadena):
@@ -167,12 +246,24 @@ if __name__ == '__main__':
         elif cadena == "Aleatorio":
             return js.JugadorAleatorio()
         elif cadena == "Negamax":
+            # Negamax con las funciones originales
             return minimax.JugadorNegamax(
-                ordena=cfg["ordena"], d=cfg["profundidad máxima"], evalua=cfg["evalua"]
+                ordena=ordena_centro, d=cfg["profundidad máxima"], evalua=evalua_3con
             )
         elif cadena == "Tiempo":
+            # Negamax iterativo con las funciones originales
             return minimax.JugadorNegamaxIterativo(
-                tiempo=cfg["tiempo"], ordena=cfg["ordena"], evalua=cfg["evalua"]
+                tiempo=cfg["tiempo"], ordena=ordena_centro, evalua=evalua_3con
+            )
+        elif cadena == "NegamaxMejorado":
+            # Negamax con las funciones mejoradas
+            return minimax.JugadorNegamax(
+                ordena=ordena_mejor, d=cfg["profundidad máxima"], evalua=evalua_mejorada
+            )
+        elif cadena == "TiempoMejorado":
+            # Negamax iterativo con las funciones mejoradas
+            return minimax.JugadorNegamaxIterativo(
+                tiempo=cfg["tiempo"], ordena=ordena_mejor, evalua=evalua_mejorada
             )
         else:
             raise ValueError("Jugador no reconocido")
